@@ -17,9 +17,18 @@ abstract class AbstractFunctionalSpec extends Specification {
     protected processOutput = new StringBuilder()
 
     protected final baseWorkDir = new File(System.getProperty("lazybones.testWorkDir") ?:
-        System.getProperty("user.dir") + "/build/testWork")
+        System.getProperty("user.dir") + "/build/testWork", "cmdWork")
 
     protected final env = [:]
+    protected final filesToDelete = []
+
+    protected long commandTimeout = 10000
+
+    void cleanup() {
+        for (File f in filesToDelete) {
+            f.delete()
+        }
+    }
 
     /**
      * Runs a lazybones command. For example:
@@ -38,14 +47,16 @@ abstract class AbstractFunctionalSpec extends Specification {
      * larger.
      * @return The exit code of the lazybones process.
      */
-    int runCommand(List cmdList, File workDir, List inputs = []) {
-        // Clear out results of previous executions
-        FileUtils.deleteDirectory(workDir)
+    int runCommand(List cmdList, File workDir, List inputs = [], boolean clearPrevious = true) {
+        if (clearPrevious) {
+            // Clear out results of previous executions
+            FileUtils.deleteDirectory(workDir)
+        }
         resetOutput()
         workDir.mkdirs()
 
         def lazybonesInstallDir = System.getProperty("lazybones.installDir") ?:
-                System.getProperty("user.dir") + "/build/install"
+                System.getProperty("user.dir") + "/build/install/lazybones"
         def lzbExecutable = FilenameUtils.concat(lazybonesInstallDir, "bin/lazybones")
         if (windows) {
             lzbExecutable = FilenameUtils.separatorsToWindows(lzbExecutable + ".bat")
@@ -56,16 +67,19 @@ abstract class AbstractFunctionalSpec extends Specification {
             env["PATH"] = System.getenv("PATH")
         }
 
-        if (System.getProperty("lazybones.cacheDir")) {
-            env["JAVA_OPTS"] = (env["JAVA_OPTS"] ?: "") +
-                    " -Dlazybones.cacheDir=${System.getProperty("lazybones.cacheDir")}"
+        def systemProps = System.properties.findAll {
+            it.key.startsWith("lazybones.") && !(it.key in ["installDir", "testWorkDir"])
+        }.collect {
+            "-D" + it.key + '="' + it.value + '"'
         }
 
-        // The execute() method expects the environment as a list of strings of
-        // the form VAR=value.
-        def envp = env.collect { key, value -> key + "=" + value }
+        if (systemProps) {
+            env["JAVA_OPTS"] = (env["JAVA_OPTS"] ?: "") + " " + systemProps.join(' ')
+        }
 
-        Process process = ([lzbExecutable, "--stacktrace"] + cmdList).execute(envp, workDir)
+        def processBuilder = new ProcessBuilder([lzbExecutable] + cmdList).redirectErrorStream(true).directory(workDir)
+        processBuilder.environment().putAll(env)
+        def process = processBuilder.start()
 
         if (inputs) {
             def newLine = System.getProperty("line.separator")
@@ -83,15 +97,13 @@ abstract class AbstractFunctionalSpec extends Specification {
         }
 
         def stdoutThread = consumeProcessStream(process.inputStream)
-        def stderrThread = consumeProcessStream(process.errorStream)
-        process.waitForOrKill(10000)
+        process.waitForOrKill(commandTimeout)
         int exitCode = process.exitValue()
 
         // The process may finish before the consuming threads have finished, so
         // give them a chance to complete so that we have the command output in
         // the buffer.
         stdoutThread.join 1000
-        stderrThread.join 1000
         println "Output from executing ${cmdList.join(' ')} (exit code: $exitCode)"
         println "---------------------"
         println output
@@ -120,10 +132,12 @@ abstract class AbstractFunctionalSpec extends Specification {
      * returns it as a string.
      */
     protected String readLazybonesVersion() {
-        def stream = getClass().getResourceAsStream("lazybones.properties")
-        def props = new Properties()
-        props.load(stream)
-        return props.getProperty("lazybones.version")
+        return System.getProperty("lzbtest.expected.version")
+    }
+
+    protected final String getCacheDirPath() {
+        return System.getProperty("lazybones.cache.dir") ?:
+                FilenameUtils.concat(System.getProperty('user.home'), "/.lazybones/templates")
     }
 
     protected final boolean isWindows() { return System.getProperty("os.name")?.startsWith("Windows") }

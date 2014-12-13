@@ -2,11 +2,12 @@ buildscript {
     repositories {
         mavenCentral()
         maven { url "http://dl.bintray.com/pledbrook/plugins" }
+        mavenLocal()
     }
 
     dependencies {
-        classpath "uk.co.cacoethes:lazybones-gradle:1.0",
-                  "net.saliman:gradle-cobertura-plugin:1.1.2"
+        classpath "uk.co.cacoethes:lazybones-gradle:1.2.2",
+                  "net.saliman:gradle-cobertura-plugin:2.2.4"
     }
 }
 
@@ -16,18 +17,20 @@ apply plugin: "groovy"
 apply plugin: "application"
 apply plugin: "cobertura"
 apply plugin: "codenarc"
+apply plugin: "uk.co.cacoethes.lazybones-templates"
 
 applicationName = "lazybones"
 mainClassName = "uk.co.cacoethes.lazybones.LazybonesMain"
-version = "0.5-SNAPSHOT"
+version = "0.7.1"
 
 sourceCompatibility = "1.6"
 targetCompatibility = "1.6"
 
 ext {
-    groovyVersion = "2.1.5"
-    installDir = new File(System.getProperty("user.home"), ".lazybones/templates")
-    testCacheDir = new File(project.buildDir, "template-cache")
+    groovyVersion = "2.3.3"
+    cachePath = new File(System.getProperty("user.home"), ".lazybones/templates").absolutePath
+    isCiBuild = System.getProperty("drone.io") as boolean
+    testWorkDir = file("$buildDir/testWork").path
 }
 
 sourceSets {
@@ -53,7 +56,10 @@ dependencies {
             "org.apache.commons:commons-compress:1.5",
             "com.github.groovy-wslite:groovy-wslite:0.7.2",
             "net.sf.jopt-simple:jopt-simple:4.4",
-            "com.github.jknack:handlebars:1.2.1"
+            "com.github.jknack:handlebars:1.2.1”,
+            "org.ini4j:ini4j:0.5.2"
+
+    runtime "org.apache.ivy:ivy:2.3.0"
 
     testCompile "org.spockframework:spock-core:0.7-groovy-2.0"
 
@@ -62,32 +68,62 @@ dependencies {
                      "co.freeside:betamax:1.1.2"
 }
 
-task generateAppResources(type: GenerateProjectProperties) {
-    target = file("${sourceSets.main.output.classesDir}/uk/co/cacoethes/lazybones/lazybones.properties")
+jar {
+    manifest {
+        attributes("Implementation-Title": "Lazybones", "Implementation-Version": version)
+    }
 }
 
-tasks.processResources.dependsOn generateAppResources
-
-task generateIntegTestResources(type: GenerateProjectProperties) {
-    target = file("${sourceSets.integTest.output.classesDir}/uk/co/cacoethes/lazybones/lazybones.properties")
+lazybones {
+    templateDirs = files(file("${projectDir}/src/integTest/templates").listFiles())
+    template "subtemplates-tmpl" includes "controller", "entity", "bad"
+    template "test-handlebars", {
+        version = "0.1.1"
+    }
 }
 
-//for a single test, you can run "gradle -DintegTests.single=<test name>"
-task integTests(type: Test) {
-    dependsOn "installApp", "generateIntegTestResources"
+task configureCachePath {
+    if (isCiBuild) {
+        // Load the default cache directory location from the default config file.
+        // We have to defer the evaluation until after the test resources have been
+        // copied onto the classpath.
+        def defaultConfigFile = sourceSets.main.resources.filter { it.name == "defaultConfig.groovy" }.singleFile
+        def defaultConfig = new ConfigSlurper().parse(defaultConfigFile.text)
+        project.cachePath = defaultConfig.cache.dir
+    }
+    else {
+        project.cachePath = testWorkDir + "/template-cache"
+    }
 
-    systemProperty "lazybones.testWorkDir", file("$buildDir/testWork").path
+    project.extensions.lazybones.installDir = new File(project.cachePath)
+}
+
+//for a single test, you can run "gradle -DintegTest.single=<test name>"
+task integTest(type: Test) {
+    dependsOn "installApp", "configureCachePath", "installAllTemplates"
+    inputs.dir sourceSets.main.output.classesDir
+    inputs.dir sourceSets.main.output.resourcesDir
+
+    mustRunAfter "test"
+    ignoreFailures = true
+
+    systemProperty "lazybones.testWorkDir", testWorkDir
     systemProperty "lazybones.installDir", installApp.destinationDir.path
+    systemProperty "lzbtest.expected.version", version
 
     // Allows us to disable tests that don't work on Drone.io, such as the
     // CreateFunctionalSpec feature test for --with-git.
-    if (System.getProperty("drone.io")) {
+    systemProperty "lazybones.config.file",
+                   sourceSets.integTest.resources.filter { it.name == "test-config.groovy" }.singleFile.absolutePath
+
+    def cachePath
+    if (isCiBuild) {
         systemProperty "drone.io", "true"
     }
     else {
         // Use the default cache location on the CI server, but a custom one
         // on local machines to avoid polluting the developer's own cache.
-        systemProperty "lazybones.cacheDir", testCacheDir.absolutePath
+        systemProperty "lazybones.cache.dir", project.cachePath
     }
 
     testClassesDir = sourceSets.integTest.output.classesDir
@@ -95,19 +131,6 @@ task integTests(type: Test) {
 
     include "**/*Spec*"
     exclude "**/Abstract*Spec*"
-
-    doFirst {
-        // Remove the cache directory. This ensures that when the tests run,
-        // an existing cache doesn't affect the results.
-        testCacheDir.deleteDir()
-
-        // This template package will be in the cache, but not available from
-        // Bintray or any other remote location.
-        copy {
-            from "$projectDir/src/integTest/resources/test-tmpl-0.2.zip"
-            into testCacheDir
-        }
-    }
 }
 
 task packageReports(type: Zip) {
@@ -116,7 +139,7 @@ task packageReports(type: Zip) {
     destinationDir = buildDir
 }
 
-integTests.finalizedBy packageReports
+integTest.finalizedBy packageReports
 
 codenarc {
     configFile = rootProject.file("codenarc.groovy")
@@ -130,11 +153,15 @@ cobertura {
     coverageSourceDirs = sourceSets.main.allSource.srcDirs
 }
 
-distZip.dependsOn("test", "integTests")
+distZip.dependsOn("test", "integTest")
+check.dependsOn("test", "integTest")
 
 task uploadDist(type: BintrayGenericUpload, dependsOn: "distZip") {
     artifactFile = distZip.archivePath
-    artifactUrlPath = "lazybones/$version/${distZip.archiveName}"
+    artifactUrlPath = "lazybones/${version}/${distZip.archiveName}"
+    repositoryName = "pledbrook/lazybones-templates"
+    packageName = "lazybones"
+    licenses = ["Apache-2.0"]
 }
 
 // Lazy initialisation of uploadDist task so that not all build users need to
@@ -158,24 +185,5 @@ gradle.taskGraph.whenReady { graph ->
 void verifyProperty(Project proj, String name) {
     if (!project.hasProperty(name)) {
         throw new GradleException("You must define the project property '$name'")
-    }
-}
-
-/**
- * Simple task that writes a selection of the project's build properties into
- * a file. At the moment, only the Lazybones version gets written.
- */
-class GenerateProjectProperties extends DefaultTask {
-    @OutputFile
-    File target
-
-    @TaskAction
-    void generate() {
-        def props = new Properties()
-        props.setProperty("lazybones.version", project.version)
-
-        target.withWriter { w ->
-            props.store(w, "Lazybones project properties")
-        }
     }
 }

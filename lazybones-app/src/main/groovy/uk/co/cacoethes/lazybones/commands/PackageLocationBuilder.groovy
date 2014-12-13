@@ -5,43 +5,25 @@ import org.apache.commons.io.FilenameUtils
 import uk.co.cacoethes.lazybones.PackageInfo
 import uk.co.cacoethes.lazybones.PackageNotFoundException
 import uk.co.cacoethes.lazybones.packagesources.PackageSource
+import uk.co.cacoethes.util.UrlUtils
 
 /**
  * Builds a PackageLocation object based on the command info from the
  */
 @Log
 class PackageLocationBuilder {
-    static final String DEFAULT_CACHE_PATH =
-            FilenameUtils.concat(System.getProperty('user.home'), "/.lazybones/templates")
-
-    final File cacheDir = new File(System.getProperty("lazybones.cacheDir") ?: DEFAULT_CACHE_PATH)
-
-    PackageLocationBuilder() { }
+    final File cacheDir
 
     PackageLocationBuilder(File cacheDir) {
         this.cacheDir = cacheDir
     }
 
     PackageLocation buildPackageLocation(String packageName, String version, List<PackageSource> packageSources) {
-        if (isUrl(packageName)) {
+        if (UrlUtils.isUrl(packageName)) {
             return buildForUrl(packageName)
         }
 
         buildForBintray(packageName, version, packageSources)
-    }
-
-    /**
-     * Determines whether the given package name is in fact a full blown URI,
-     * including scheme.
-     */
-    private boolean isUrl(String str) {
-        try {
-            def uri = new URI(str)
-            return uri.scheme
-        }
-        catch (URISyntaxException ex) {
-            return false
-        }
     }
 
     private PackageLocation buildForUrl(String url) {

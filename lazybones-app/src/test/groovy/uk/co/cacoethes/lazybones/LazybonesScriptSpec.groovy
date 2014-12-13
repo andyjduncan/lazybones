@@ -14,6 +14,7 @@ import static uk.co.cacoethes.lazybones.LazybonesScript.DEFAULT_ENCODING
  * @author Tommy Barker
  */
 class LazybonesScriptSpec extends Specification {
+    static final String NEW_LINE = System.getProperty("line.separator")
 
     def script = new LazybonesScript()
     File fileToFilter
@@ -60,7 +61,7 @@ class LazybonesScriptSpec extends Specification {
 
     void "basic tests for filtering an individual file"() {
         when:
-        script.processTemplatesHelper(fileToFilter, [foo: "bar", bar: "bam"])
+        script.processTemplateWithEngine(fileToFilter, [foo: "bar", bar: "bam"], new SimpleTemplateEngine(), true)
 
         then:
         "hello bar and bam" == fileToFilter.text
@@ -68,7 +69,7 @@ class LazybonesScriptSpec extends Specification {
 
     void "illegal argument exception is thrown if the file does not exist"() {
         when:
-        script.processTemplatesHelper(new File("bar"), [foo: "bar"])
+        script.processTemplateWithEngine(new File("bar"), [foo: "bar"], new SimpleTemplateEngine(), true)
 
         then:
         thrown(IllegalArgumentException)
@@ -76,8 +77,8 @@ class LazybonesScriptSpec extends Specification {
 
     void "if value is returned by user return that"() {
         given:
-        def reader = createReader("baz")
-        script.setReader(reader)
+        script = new LazybonesScript()
+        script.setReader(createReader("baz"))
 
         when:
         def response = script.ask("give me foo")
@@ -113,9 +114,9 @@ class LazybonesScriptSpec extends Specification {
     void "do full script inheritance with file filtering"() {
         given:
         LazybonesScript script = createScript(lazybonesScript.text)
-        script.setTargetDir(testFolder.root.path)
-        def newLine = System.getProperty("line.separator")
-        script.setReader(createReader("foobar${newLine}foofam"))
+        script.setProjectDir(testFolder.root)
+        script.setTemplateDir(testFolder.root)
+        script.setReader(createReader("foobar${NEW_LINE}foofam"))
 
         when:
         script.run()
@@ -137,6 +138,29 @@ class LazybonesScriptSpec extends Specification {
 
         then:
         "bar" == response
+        script.parentParams["foo"] == "bar"
+    }
+
+    void "ask saves the value for named variables"() {
+        given:
+        def scriptText = """
+            ask("give me foo", null, "foo")
+            ask("how old are you?", -1, "age")
+        """
+        LazybonesScript script = createScript(scriptText)
+        script.setReader(createReader("foobar${NEW_LINE}42${NEW_LINE}"))
+
+        when:
+        script.run()
+
+        then:
+        script.parentParams["foo"] == "foobar"
+        script.parentParams["age"] == "42"
+    }
+
+    void "default template engine is SimpleTemplateEngine"() {
+        expect:
+        SimpleTemplateEngine == new LazybonesScript().templateEngine.class
     }
 
     void "default template engine is SimpleTemplateEngine"() {

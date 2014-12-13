@@ -1,18 +1,22 @@
 package uk.co.cacoethes.lazybones.commands
 
+import groovy.transform.CompileStatic
 import groovy.util.logging.Log
 import uk.co.cacoethes.lazybones.PackageNotFoundException
 
+/**
+ * Handles the retrieval of template packages from Bintray (or other supported
+ * repositories).
+ */
+@CompileStatic
 @Log
 class PackageDownloader {
-    /** Where the template packages are stored/cached */
-    static final File INSTALL_DIR = new File(System.getProperty('user.home'), ".lazybones/templates")
 
     File downloadPackage(PackageLocation packageLocation, String packageName, String version) {
         def packageFile = new File(packageLocation.cacheLocation)
 
         if (!packageFile.exists()) {
-            INSTALL_DIR.mkdirs()
+            packageFile.parentFile.mkdirs()
 
             // The package info may not have been requested yet. It depends on
             // whether the user specified a specific version or not. Hence we

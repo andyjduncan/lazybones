@@ -1,16 +1,16 @@
 package uk.co.cacoethes.lazybones.commands
 
-import groovy.transform.CompileStatic
 import groovy.util.logging.Log
 import joptsimple.OptionParser
 import joptsimple.OptionSet
-import org.apache.commons.io.FilenameUtils
 import uk.co.cacoethes.lazybones.LazybonesScriptException
 import uk.co.cacoethes.lazybones.NoVersionsFoundException
 import uk.co.cacoethes.lazybones.PackageNotFoundException
 import uk.co.cacoethes.lazybones.packagesources.PackageSource
 import uk.co.cacoethes.lazybones.packagesources.PackageSourceBuilder
+import uk.co.cacoethes.lazybones.scm.GitAdapter
 import uk.co.cacoethes.util.ArchiveMethods
+import wslite.http.HTTPClientException
 
 import java.util.logging.Level
 
@@ -18,13 +18,12 @@ import java.util.logging.Level
  * Implements Lazybone's create command, which creates a new project based on
  * a specified template.
  */
-@CompileStatic
 @Log
 class CreateCommand extends AbstractCommand {
-    final PackageSourceBuilder packageSourceFactory = new PackageSourceBuilder()
-    final PackageLocationBuilder packageLocationFactory = new PackageLocationBuilder()
-    final PackageDownloader packageDownloader = new PackageDownloader()
-    final InstallationScriptExecuter installationScriptExecuter = new InstallationScriptExecuter()
+    final PackageSourceBuilder packageSourceFactory
+    final PackageLocationBuilder packageLocationFactory
+    final PackageDownloader packageDownloader
+    final Map mappings
 
     static final String USAGE = """\
 USAGE: create <template> <version>? <dir>
@@ -38,8 +37,20 @@ USAGE: create <template> <version>? <dir>
 """
     private static final String README_BASENAME = "README"
     private static final String SPACES_OPT = "spaces"
-    protected static final String VAR_OPT = "P"
-    protected static final String GIT_OPT = "with-git"
+    private static final String VAR_OPT = "P"
+    private static final String GIT_OPT = "with-git"
+
+    CreateCommand(ConfigObject config) {
+        this(config.cache.dir as File)
+        assert config.cache.dir
+        mappings = config.templates.mappings
+    }
+
+    CreateCommand(File cacheDir) {
+        packageSourceFactory = new PackageSourceBuilder()
+        packageLocationFactory = new PackageLocationBuilder(cacheDir)
+        packageDownloader = new PackageDownloader()
+    }
 
     @Override
     String getName() { return "create" }
@@ -59,30 +70,38 @@ USAGE: create <template> <version>? <dir>
 
     @Override
     protected IntRange getParameterRange() {
-        1..3
+        2..3  // Either a directory or a version + a directory
     }
 
     @Override
     protected String getUsage() { return USAGE }
 
-    protected int doExecute(OptionSet cmdOptions,  Map globalOptions, ConfigObject configuration) {
+    protected int doExecute(OptionSet cmdOptions, Map globalOptions, ConfigObject configuration) {
         try {
             def createData = evaluateArgs(cmdOptions)
 
             List<PackageSource> packageSources = packageSourceFactory.buildPackageSourceList(configuration)
             PackageLocation packageLocation = packageLocationFactory.buildPackageLocation(
-                    createData.packageName,
+                    createData.packageArg.templateName,
                     createData.requestedVersion,
                     packageSources)
             File pkg = packageDownloader.downloadPackage(
                     packageLocation,
-                    createData.packageName,
+                    createData.packageArg.templateName,
                     createData.requestedVersion)
 
-            createData.targetDir.mkdirs()
-            ArchiveMethods.unzip(pkg, createData.targetDir)
+            def targetDir = createData.targetDir.canonicalFile
+            targetDir.mkdirs()
+            ArchiveMethods.unzip(pkg, targetDir)
 
-            installationScriptExecuter.runPostInstallScriptWithArgs(cmdOptions, createData.targetDir)
+            def scmAdapter = null
+            if (cmdOptions.has(GIT_OPT)) scmAdapter = new GitAdapter(configuration)
+
+            def executor = new InstallationScriptExecuter(scmAdapter)
+            executor.runPostInstallScriptWithArgs(
+                    cmdOptions.valuesOf(VAR_OPT).collectEntries { String it -> it.split('=') as List },
+                    createData.packageArg.qualifiers,
+                    targetDir)
 
             logReadme(createData)
 
@@ -103,9 +122,22 @@ USAGE: create <template> <version>? <dir>
             log.severe "No version of '${ex.packageName}' has been published"
             return 1
         }
+        catch (HTTPClientException ex) {
+            if (OfflineMode.isOffline(ex)) {
+                OfflineMode.printlnOfflineMessage(ex, log, globalOptions.stacktrace as boolean)
+            }
+            else {
+                log.severe "Unexpected failure: ${ex.message}"
+                if (globalOptions.stacktrace) log.log Level.SEVERE, "", ex
+            }
+
+            println()
+            println "Cannot create a new project when the template isn't locally cached or no version is specified"
+            return 1
+        }
         catch (LazybonesScriptException ex) {
-            log.warning "Post install script caused an exception, project might be corrupt: ${ex.cause.message}"
-            log.warning "The unpacked template will remain in place to help you diagnose the problem"
+            log.severe "Post install script caused an exception, project might be corrupt: ${ex.cause.message}"
+            log.severe "The unpacked template will remain in place to help you diagnose the problem"
 
             if (globalOptions.stacktrace) {
                 log.log Level.SEVERE, "", ex.cause
@@ -123,24 +155,28 @@ USAGE: create <template> <version>? <dir>
         def mainArgs = commandOptions.nonOptionArguments()
         def createCmdInfo = getCreateInfoFromArgs(mainArgs)
 
-        logStart createCmdInfo.packageName, createCmdInfo.requestedVersion, createCmdInfo.targetDir.path
+        logStart createCmdInfo.packageArg.templateName, createCmdInfo.requestedVersion, createCmdInfo.targetDir
 
         return createCmdInfo
     }
 
-    private CreateCommandInfo getCreateInfoFromArgs(List<String> mainArgs) {
+    @SuppressWarnings('SpaceAroundOperator')
+    protected CreateCommandInfo getCreateInfoFromArgs(List<String> mainArgs) {
+
+        def packageName = new TemplateArg(mappings?."${mainArgs[0]}" ?: mainArgs[0])
+
         if (hasVersionArg(mainArgs)) {
-            return new CreateCommandInfo(mainArgs[0], mainArgs[1], mainArgs[2] as File)
+            return new CreateCommandInfo(packageName, mainArgs[1], toFile(mainArgs[2]))
         }
 
-        return new CreateCommandInfo(mainArgs[0], '', mainArgs[1] as File)
+        return new CreateCommandInfo(packageName, '', toFile(mainArgs[1]))
     }
 
     protected boolean hasVersionArg(List<String> args) {
         return args.size() == 3
     }
 
-    private void logStart(String packageName, String version, String targetPath) {
+    private void logStart(String packageName, String version, File targetPath) {
         if (log.isLoggable(Level.INFO)) {
             log.info "Creating project from template " + packageName + ' ' +
                     (version ?: "(latest)") + " in " +
@@ -150,13 +186,14 @@ USAGE: create <template> <version>? <dir>
 
     private void logSuccess(CreateCommandInfo createData) {
         log.info ""
-        log.info "Project created in " + (isPathCurrentDirectory(createData.targetDir.path) ?
-                'current directory' : createData.targetDir.path) + '!'
+        log.info "Project created in " + (isPathCurrentDirectory(createData.targetDir) ?
+            'current directory' : createData.targetDir.path) + '!'
     }
 
+    @SuppressWarnings('SpaceBeforeOpeningBrace')
     private void logReadme(CreateCommandInfo createData) {
         // Find a suitable README and display that if it exists.
-        def readmeFiles = createData.targetDir.listFiles( { File dir, String name ->
+        def readmeFiles = createData.targetDir.canonicalFile.listFiles({ File dir, String name ->
             name == README_BASENAME || name.startsWith(README_BASENAME)
         } as FilenameFilter)
 
@@ -165,7 +202,15 @@ USAGE: create <template> <version>? <dir>
         else log.info readmeFiles[0].text
     }
 
-    private boolean isPathCurrentDirectory(String path) {
-        return FilenameUtils.equalsNormalized(path, ".")
+    private boolean isPathCurrentDirectory(File path) {
+        return path.canonicalPath == new File("").canonicalPath
+    }
+
+    /**
+     * Converts a string file path to a `File` instance. Its unique behaviour
+     * is that the path "." is translated to "", i.e. the empty path.
+     */
+    private File toFile(String path) {
+        return new File(path == "." ? "" : path)
     }
 }

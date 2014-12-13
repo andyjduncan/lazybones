@@ -3,7 +3,7 @@ apply plugin: "maven"
 
 archivesBaseName = "lazybones-gradle"
 group = "uk.co.cacoethes"
-version = "1.0.2"
+version = "1.2.2"
 
 repositories {
     mavenCentral()
@@ -14,7 +14,25 @@ dependencies {
     // to specify localGroovy() too
     compile localGroovy(), gradleApi()
 
-    testCompile "org.spockframework:spock-core:0.7-groovy-1.8", "cglib:cglib-nodep:2.2.2"
+    testCompile "org.spockframework:spock-core:0.7-groovy-2.0", {
+        exclude module: "groovy-all"
+    }
+    testCompile "cglib:cglib-nodep:2.2.2"
+}
+
+task sourcesJar(type: Jar, dependsOn: classes) {
+    classifier = 'sources'
+    from sourceSets.main.allSource
+}
+
+task javadocJar(type: Jar, dependsOn: groovydoc) {
+    classifier = 'javadoc'
+    from groovydoc.destinationDir
+}
+
+artifacts {
+    archives sourcesJar
+    archives javadocJar
 }
 
 uploadArchives { task ->
@@ -37,7 +55,6 @@ uploadArchives { task ->
         }
     }
 }
-
 
 void verifyProperty(Project proj, String name) {
     if (!project.hasProperty(name)) {

@@ -24,16 +24,18 @@ class BintrayGenericUploadSpec extends Specification {
             artifactFile = mockFile
             artifactUrlPath = mockPath
             repositoryUrl = repoUrl
+            publish = autoPublish
         }
 
         when: "I calculate the full URL"
-        def targetUrl = task.calculateFullUrl()
+        def targetUrl = task.calculateUploadUrl()
 
         then: "It includes the path separators in the right place"
         targetUrl == expected
 
         where:
         repoUrl << [ baseRepoUrl, baseRepoUrl + '/' ]
-        expected << [ baseRepoUrl + '/' + mockPath, baseRepoUrl + '/' + mockPath ]
+        autoPublish << [ true, false ]
+        expected << [ baseRepoUrl + '/' + mockPath + ';publish=1', baseRepoUrl + '/' + mockPath + ';publish=0' ]
     }
 }
